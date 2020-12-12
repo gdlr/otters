@@ -1,0 +1,182 @@
+---
+title: "threat_layer_analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(raster)
+library(tidyverse)
+library(sf)
+library(here)
+library(rgdal)
+library(doParallel)
+library(rgeos)
+
+rasterOptions(maxmemory = 1e12)
+```
+
+## This rMarkdown processes the layers for the threat analysis and creates a finalized threat layer.
+
+```{r}
+# Set base projection
+proj <- crs("+proj=longlat +datum=WGS84 +no_defs")
+
+aoi <- extent(c(-125.5,
+                -114.1191,
+                31,
+                42))
+
+# Read in blank raster with BO extent and resolution
+base <- raster(here("maxent_inputs", "bo_dissox.asc"))
+crs(base) <- proj
+```
+
+## Fishing pressure processing:
+
+```{r}
+# Read data
+fish_press <- raster(here("raw_data", "All_Fisheries_Ton_Km2_1931_2005.tif"))
+# Reproject the base raster to the fishing pressure crs (the following steps save memory)
+base_reproj <- projectRaster(base, crs = crs(fish_press))
+# Crop fishing to our AOI
+fish_crop <- crop(fish_press, base_reproj)
+# Resample to our 5 arcmin grid
+fish_resample <- resample(fish_crop, base_reproj, fun = "sum")
+# Reproject back into our normal CRS and resolution
+fish_reproj <- projectRaster(fish_resample, base)
+# Save
+writeRaster(fish_reproj, here("threats", "fishing_pressure_unscaled.tif"))
+
+
+fish_reproj <- raster(here("threats", "fishing_pressure_unscaled.tif"))
+# Reclassify to a proportional weight for each cell
+fish_prop <- fish_reproj/maxValue(fish_reproj)
+```
+# Vessel tracks processing
+
+```{r}
+# Get layer names
+layers <- ogrListLayers(here("raw_data", "WestCoast.gdb"))
+
+# Write a function that reads, projects, crops, and rasterizes each monthly layer
+tracks_fx <- function(layer){
+  library(raster)
+  library(sf)
+  library(here)
+  library(rgeos)
+  tracks <- st_read(here("raw_data", "WestCoast.gdb"), layers)
+  tracks_t <- st_transform(tracks, proj)
+  tracks_c <- st_crop(tracks_t, aoi)
+  tracks_raster <- rasterize(tracks, base, fun = "count")
+  name <- paste(layer, ".tif", sep = "")
+  writeRaster(tracks_raster, here("scratch", name))
+}
+
+# Run it in parallel to speed up processing time
+cl <- makeCluster(detectCores()-1)
+registerDoParallel(cl)
+clusterExport(cl, varlist = c("layers", "proj", "aoi", "base"))
+parLapply(cl, layers, tracks_fx)
+stopCluster(cl)
+
+# Brick all these files:
+# List them
+track_rs <- list.files(here("scratch"), pattern = ".tif")
+# Select just the tif's, not the XMLs
+track_stack <- stack(here("scratch", track_rs[c(1,3,5,7,9,11,13,15,17,19,21,23)]))
+# Make a new raster with the sum of all the cells
+track_sum_2018 <- raster::calc(track_stack, fun = sum)
+# Save it
+writeRaster(track_sum_2018, here("threats", "tracks_sum_2018_unscaled.tif"), overwrite = TRUE)
+
+# Reclassify to a proportional weight for each cell:
+track_sum_2018 <- raster(here("threats", "tracks_sum_2018_unscaled.tif")) 
+tracks_prop <- track_sum_2018/maxValue(track_sum_2018)
+plot(tracks_prop)
+```
+
+
+# Oil leases and platforms
+```{r}
+# Download oil platforms
+download.file("https://www.boem.gov/PC-plat.zip", destfile = "oil_platforms.zip")
+# Download active oil leases
+download.file("https://www.boem.gov/PC-lease.zip", destfile = "oil_leases.zip")
+
+# Read in platform data
+platforms_shp <- st_read(here("raw_data", "oil_platforms"), layer = "pc_plat")
+# Reproject
+platforms_proj <- st_transform(platforms_shp, proj)
+# Crop
+platforms_crop <- st_crop(platforms_shp, aoi)
+# Reproject to a meters projection
+plat_m <- st_transform(platforms_crop, 7801)
+# Buffer by 500m
+platforms_buffer <- st_buffer(plat_m, dist = 500)
+# Reproject back into our normal projection
+plat_proj_buff <- st_transform(platforms_buffer, proj)
+# Rasterize
+platforms_raster <- rasterize(platforms_crop, base, field = 1, background = 0)
+#Save
+writeRaster(platforms_raster, here("threats", "platforms.tif"), overwrite = TRUE)
+
+
+# Read in lease data
+lease_shp <- st_read(here("raw_data", "oil_leases"), layer = "BOEM_Pacific_Leases")
+# Reproject
+lease_proj <- st_transform(lease_shp, proj)
+# Crop
+lease_crop <- st_crop(lease_shp, aoi)
+# Rasterize
+lease_raster <- rasterize(lease_crop, base, field = 1, background = 0)
+#Save
+writeRaster(lease_raster, here("threats", "leases.tif"))
+
+# Combine the two...
+oil_comb <- lease_raster+platforms_raster
+# Reclassify so that cells with oil = 1
+oil_comb_r <- reclassify(oil_comb, c(-Inf, 0, 0, 0, Inf, 1))
+# Save it
+writeRaster(oil_comb_r, here("threats", "oil_combined.tif"))
+oil_comb_r <- raster(here("threats", "oil_combined.tif"))
+```
+
+
+
+# Create combined threat layer:
+
+With equal weights, it seems like oil is too heavily weighted:
+```{r}
+# Add the proportional layers together:
+comb_threat <- tracks_prop + oil_comb_r + fish_prop
+# Make proportional from 0-1:
+comb_threat_prop <- comb_threat/maxValue(comb_threat)
+# Save it
+writeRaster(comb_threat_prop, here("threats", "comb_threat_prop.tif"))
+
+# Make a raster for the top 25% of most threatened cells:
+threat_top50 <- reclassify(comb_threat_prop, c(-Inf, 0.5, 0, 
+                                               0.5, 1, 1))
+writeRaster(threat_top50, here("threats", "threat_top50.tif"))
+plot(threat_top50)
+```
+Oil seems to have too much weight in this scheme.
+So we can diminish oil's value in the weighting scheme
+```{r}
+# Weight oil 0.75 of its original value:
+threat2 <- tracks_prop + fish_prop + 0.6*(oil_comb_r)
+# Rescale from 0-1:
+threat2_prop <- threat2/maxValue(threat2)
+# Then take the top 50$ of raster values
+threat2_top50 <- reclassify(threat2_prop, c(-Inf, 0.5, 0, 
+                                               0.5, 1, 1))
+
+
+plot(threat2_top50)
+plot(threat2_prop)
+
+writeRaster(threat2_top50, here("threats", "threat_oil.6.tif"))
+```
+

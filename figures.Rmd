@@ -1,0 +1,339 @@
+---
+title: "figures"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+library(rnaturalearth)
+library(stars)
+library(patchwork)
+library(extrafont)
+```
+
+# California and Mexico shapefiles:
+```{r}
+# Read this in from `rnaturalearth`
+US <- ne_states(country = "United States of America", returnclass = "sf")
+US_sf <- st_as_sf(US, coords = c("longitude", "latitude")) %>% 
+        select(name)
+
+mexico <- ne_countries(country = "Mexico", returnclass = "sf") %>% 
+        select(name)
+
+full <- rbind(US_sf, mexico)
+full_crop <- st_crop(full, aoi)
+full_t <- st_transform(full_crop, proj)
+
+
+
+# Select for just the CA shapefile
+cali <- full %>% 
+  filter(name == "California")
+```
+
+# Kelp maxent:
+
+## First panel: current kelp distribution
+```{r}
+kelp_pal <- RColorBrewer::brewer.pal(5, "BuGn")
+
+kelp <- read_stars(here("maxent_runs", "kelp", "Kelp.asc"), crs = proj)
+
+kelp_plot <- ggplot() + 
+        theme_void() +
+        coord_equal() +
+        geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+        geom_stars(data = kelp) +
+        coord_sf(xlim = c(-125,  -116.5),
+                 ylim = c(31.4, 41.5)) +
+        theme(panel.border = element_rect(color = "black", fill = NA),
+              panel.background = element_rect(fill = "mintcream"),
+              plot.title = element_text(face = "bold"),
+              legend.position = "none") +
+        labs(title = "Kelp, current",
+             fill = "Suitability")
+```
+
+## Second panel: kelp distribution in 2050
+```{r}
+kelp_2050 <- read_stars(here("maxent_runs", "kelp", "Kelp_bo_4.5.asc"), crs = proj)
+
+kelp_2050_plot <- ggplot() +
+        theme_void() +
+        theme_void() +
+        coord_equal() +
+        geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+        geom_stars(data = kelp_2050) +
+        coord_sf(xlim = c(-125,  -116.5),
+                 ylim = c(31.4, 41.5)) +
+         theme(panel.border = element_rect(color = "black", fill = NA),
+            panel.background = element_rect(fill = "mintcream"),
+            plot.title = element_text(face = "bold"),
+            text = (element_text(family = "Times New Roman"))
+            ) +
+         labs(title = "Kelp 2050, RCP 4.5",
+              fill = "Suitability")
+
+kelp_2050_plot
+
+```
+## Third panel: change in kelp suitability
+```{r}
+# Difference
+kelp_diff <- kelp_2050 - kelp
+# Plot
+kelp_diff_plot <- ggplot() +
+      theme_void() +
+      theme_void() +
+      coord_equal() +
+      geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+      geom_stars(data = kelp_diff) +
+      scale_fill_gradient2(low = "firebrick", mid = "floralwhite", high = "forestgreen", na.value = NA,
+                           limits = c(-1, 1),
+                           guide = guide_colorbar(title.position = "bottom")) +
+      coord_sf(xlim = c(-125,  -116.5),
+               ylim = c(31.4, 41.5)) +
+      theme(panel.border = element_rect(color = "black", fill = NA),
+            panel.background = element_rect(fill = "floralwhite"),
+            plot.title = element_text(face = "bold"),
+            text = (element_text(family = "Times New Roman"))
+            ) +
+      labs(title = "Kelp suitability change", fill = "Change")
+
+kelp_diff_plot
+
+```
+
+### Final kelp fig
+```{r}
+# Combine
+kelp_suits <- ((kelp_plot + theme(legend.position = "bottom")) + (kelp_2050_plot + theme(legend.position = "bottom")) &
+        scale_fill_gradient(low = "mintcream", high = "darkgreen", na.value = NA,
+                            breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+                            limits = c(0, 1),
+                            guide = guide_colorbar(title.position = "bottom")) &
+        theme(plot.margin= unit(c(1,1,1,1), units = "mm"),
+              legend.box.background = element_rect(fill = NA, color = "black"),
+              legend.box.margin = margin(4,7,7,8),
+              legend.title.align = 0.5
+              )) + (kelp_diff_plot &
+  theme(plot.margin = unit(c(1,1,1,1), units = "mm"),
+        legend.box.background = element_rect(fill = NA, color = "black"),
+        legend.box.margin = margin(4,7,7,8),
+        legend.position = "bottom",
+        legend.title.align = 0.5
+  )) &
+    theme(text = element_text(family = "Times New Roman"))
+
+kelp_suits
+# Save
+ggsave(here("figs", "kelp_final.png"), plot = kelp_suits)
+
+```
+
+### First panel: current otter distribution
+```{r}
+# Otter current
+otters <- read_stars(here("maxent_runs", "otters", "Enhydra_lutris.asc"), crs = proj)
+
+otter_plot <- ggplot() + 
+        theme_void() +
+        coord_equal() +
+        geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+        geom_stars(data = otters) +
+        coord_sf(xlim = c(-125,  -116.5),
+                 ylim = c(31.4, 41.5)) +
+        theme(panel.border = element_rect(color = "black", fill = NA),
+              panel.background = element_rect(fill = "mintcream"),
+              plot.title = element_text(face = "bold"),
+              legend.position = "none") +
+        labs(title = "Otters, current",
+             fill = "Suitability")
+
+
+otter_plot
+```
+### Second panel: 2050 otter distribution
+```{r}
+# Otter 2050
+otters_2050 <- read_stars(here("maxent_runs", "otters", "Enhydra_lutris_bo_4.5.asc"))
+otter_2050_plot <- ggplot() + 
+        theme_void() +
+        coord_equal() +
+        geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+        geom_stars(data = otters_2050) +
+        coord_sf(xlim = c(-125,  -116.5),
+                 ylim = c(31.4, 41.5)) +
+        theme(panel.border = element_rect(color = "black", fill = NA),
+              panel.background = element_rect(fill = "mintcream"),
+              plot.title = element_text(face = "bold"),
+              legend.position = "none") +
+        labs(title = "Otters 2050, RCP 4.5",
+             fill = "Suitability")
+
+
+otter_2050_plot
+```
+### Third panel: otter suitability difference
+```{r}
+# Difference
+ott_diff <- otters_2050-otters
+
+otter_diff_plot <- ggplot() +
+      theme_void() +
+      theme_void() +
+      coord_equal() +
+      geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+      geom_stars(data = ott_diff) +
+      scale_fill_gradient2(low = "firebrick", mid = "floralwhite", high = "forestgreen", na.value = NA,
+                           limits = c(-1, 1),
+                           guide = guide_colourbar(title.position = "bottom")) +
+      coord_sf(xlim = c(-125,  -116.5),
+               ylim = c(31.4, 41.5)) +
+      theme(panel.border = element_rect(color = "black", fill = NA),
+            panel.background = element_rect(fill = "floralwhite"),
+            plot.title = element_text(face = "bold"),
+            text = (element_text(family = "Times New Roman"))
+            ) +
+      labs(title = "Otter suitability change", fill = "Change")
+
+otter_diff_plot
+
+```
+### Final otter figure
+```{r}
+otter_suits <- ((otter_plot & theme(legend.position = "bottom")) + (otter_2050_plot + theme(legend.position = "bottom")) &
+        scale_fill_gradient2(low = "mintcream", mid = "orchid1", high = "palevioletred4", na.value = NA,
+                            breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+                            midpoint = 0.5,
+                            limits = c(0, 1),
+                            guide = guide_colourbar(title.position = "bottom")
+                                                   ) &
+        theme(plot.margin= unit(c(1,1,1,1), units = "mm"),
+              legend.box.background = element_rect(fill = NA, color = "black"),
+              legend.box.margin = margin(4,7,7,8),
+              legend.title.align = 0.5
+              )) + (otter_diff_plot &
+  theme(plot.margin = unit(c(1,1,1,1), units = "mm"),
+        legend.box.background = element_rect(fill = NA, color = "black"),
+        legend.box.margin = margin(4,7,7,8),
+        legend.position = "bottom",
+        legend.title.align = 0.5)) &
+    theme(text = element_text(family = "Times New Roman"))
+
+otter_suits
+
+ggsave(here("figs", "otter_final.png"), plot = otter_suits)
+```
+
+### First panel: proportional threats
+```{r}
+threats_prop <- read_stars(here("threats", "comb_threat_prop.tif"))
+
+prop_threat_plot <- ggplot() + 
+        theme_void() +
+        coord_equal() +
+        geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+        geom_stars(data = threats_prop) +
+        coord_sf(xlim = c(-125,  -116.5),
+                 ylim = c(31.4, 41.5)) +
+        theme(panel.border = element_rect(color = "black", fill = NA),
+              panel.background = element_rect(fill = "mintcream"),
+              plot.title = element_text(face = "bold"),
+              legend.position = "bottom",
+              legend.title.align = 0.5) +
+        labs(title = "Scaled threats", fill = "Threat level") +
+  scale_fill_gradient2(low = "mintcream", mid = "yellow", high = "deeppink", na.value = NA,
+                            breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+                            midpoint = 0.5,
+                            limits = c(0, 1),
+                       guide = guide_colourbar(title.position = "bottom")
+                                                   )
+
+prop_threat_plot
+```
+### Second panel: high threat cells with otter suitability change
+```{r}
+threats <- raster(here("threats", "threat_oil.6.tif"))
+threats_s <- read_stars(here("threats", "threat_oil.6.tif"))
+
+threat_center <- st_as_sf(rasterToPoints(threats, fun = function(x){x==1}, spatial = TRUE), crs = proj)
+
+threat_plot <- ggplot() +
+      theme_void() +
+      theme_void() +
+      coord_equal() +
+      geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+      geom_stars(data = ott_diff) +
+      scale_fill_gradient2(low = "firebrick", mid = "mintcream", high = "forestgreen", na.value = NA,
+                           limits = c(-1, 1),
+                           guide = guide_colourbar(title.position = "bottom")) +
+  
+      geom_sf(data = threat_center, color = "darkblue", fill = NA, pch = 0, size = 1.2) +
+
+      coord_sf(xlim = c(-123.5,  -118),
+               ylim = c(33, 38)) +
+      theme(panel.border = element_rect(color = "black", fill = NA),
+            panel.background = element_rect(fill = "mintcream"),
+            plot.title = element_text(face = "bold"),
+            text = (element_text(family = "Times New Roman")),
+            legend.position = "bottom",
+            legend.title.align=0.5
+            ) +
+      labs(title = "High threat cells overlaid\nwith otter suitability change", fill = "Otter suitability change")
+
+threat_plot
+```
+### Third panel: otter suitability with future otter distribution
+```{r}
+threat_plot_2050 <- ggplot() +
+      theme_void() +
+      theme_void() +
+      coord_equal() +
+      geom_sf(data = full_t, color = "lemonchiffon3", fill = "lavenderblush2", na.value = NA) +
+      geom_stars(data = otters_2050) +
+      scale_fill_gradient(low = "mintcream", high = "palevioletred4", na.value = NA,
+                          guide = guide_colourbar(title.position = "bottom")
+                                                   ) +
+  
+      geom_sf(data = threat_center, color = "darkblue", fill = NA, pch = 0, size = 1.2) +
+
+      coord_sf(xlim = c(-123.5,  -118),
+               ylim = c(33, 38)) +
+      theme(panel.border = element_rect(color = "black", fill = NA),
+            panel.background = element_rect(fill = "mintcream"),
+            plot.title = element_text(face = "bold"),
+            text = (element_text(family = "Times New Roman")),
+            legend.position = "bottom",
+            legend.title.align = 0.5
+            
+            ) +
+      labs(title = "High threat cells overlaid\nwith otter habitat in 2050", fill = "2050 Otter suitability")
+
+threat_plot_2050
+
+threat_plot
+```
+### Combined threat figure
+```{r}
+
+otter_threats_final <- prop_threat_plot + threat_plot + threat_plot_2050 &
+   theme(plot.margin= unit(c(1,1,1,1), units = "mm"),
+              legend.box.background = element_rect(fill = NA, color = "black"),
+              legend.box.margin = margin(4,7,7,8),
+              legend.text = element_text(size = 10),
+         text = element_text(family = "Times New Roman")
+              ) &
+    theme(text = element_text(family = "Times New Roman"))
+
+
+otter_threats_final
+
+ggsave(here("figs", "otter_threats_final.png"), otter_threats_final)
+
+```
+

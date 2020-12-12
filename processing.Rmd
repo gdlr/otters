@@ -1,0 +1,319 @@
+---
+title: "Otter Data Processing"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(here)
+library(raster)
+library(sf)
+library(sdmpredictors)
+library(rnaturalearth)
+library(ncdf4)
+library(stars)
+library(rNOMADS)
+library(enmSdm)
+library(stringr)
+
+rasterOptions(maxmemory = 1e10)
+```
+
+## This is a document for processing raw data for the Conservation Planning final project.
+
+```{r}
+# Set base projection
+proj <- crs("+proj=longlat +datum=WGS84 +no_defs")
+```
+
+## Global variables
+California Extent:
+```{r}
+# Read this in from `rnaturalearth`
+full <- ne_states(country = "United States of America", returnclass = "sf")
+# Select for just the CA shapefile
+cali <- full %>% 
+  filter(name == "California")
+# Pull an extent from this
+cal_ext <- extent(cali)
+# Edit CA extent to include more ocean
+aoi <- extent(c(-125.5,
+                -114.1191,
+                31,
+                42))
+```
+
+## Bio Oracle Layers:
+```{r}
+# make a list of datasets
+datasets <- list_datasets(terrestrial = FALSE, marine = TRUE)
+list_layers(datasets)
+# Read in the ones we want
+bo_layers <- load_layers(c("BO_ph", "BO_dissox", "BO_sstmax", "BO_sstmean", "BO_sstmin", "BO_bathymean", "BO_bathymin", "BO_bathymax"))
+# Check plot to see
+plot(bo_layers)
+# Crop to the new extent
+bo_crop <- crop(bo_layers, aoi)
+# Test plot
+plot(bo_crop)
+# Save all these rasters
+writeRaster(bo_crop$BO_ph, filename = here("maxent_inputs", "bo_ph.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bo_crop$BO_dissox, filename = here("maxent_inputs", "bo_dissox.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bo_crop$BO_sstmax, filename = here("maxent_inputs", "bo_sstmax.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bo_crop$BO_sstmean, filename = here("maxent_inputs", "bo_sstmean.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bo_crop$BO_sstmin, filename = here("maxent_inputs", "bo_sstmin.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bo_crop$BO_bathymean, filename = here("maxent_inputs", "bo_bathymean.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bo_crop$BO_bathymin, filename = here("maxent_inputs", "bo_bathymin.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bo_crop$BO_bathymax, filename = here("maxent_inputs", "bo_bathymax.asc"), format = "ascii", overwrite = TRUE)
+```
+
+```{r}
+# Create a base raster from BioOracle
+base <- raster(here("maxent_inputs", "bo_dissox.asc"))
+```
+
+## GBIF otter data
+
+```{r}
+# DOI for otter2: 10.15468/dl.eqcwg3
+
+gbif_otter2 <- read_tsv(here("raw_data", "GBIF", "otter_obs_gbif.csv")) %>% 
+  dplyr::select("day", "month", "year", "decimalLatitude", "decimalLongitude")
+
+# Remove observations wtihout coordinates:
+otter_nona <- gbif_otter2 %>% 
+  drop_na("decimalLatitude", "decimalLongitude")
+# Make it an sf object
+otter_sf <- st_as_sf(otter_nona, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+# Test plot
+plot(otter_sf)
+# Save it
+write_csv(otter_sf, here("scratch", "otter_obs_clean.csv"))
+# Reformat for maxent
+otter_maxent <- otter_sf %>% 
+  mutate(species = "Enhydra lutris",
+         longitude = sf::st_coordinates(.)[,1],
+         latitude = sf::st_coordinates(.)[,2]) %>% 
+  dplyr::select("species", "longitude", "latitude")
+
+otter_maxent_df <- as_data_frame(otter_maxent) %>% 
+  dplyr::select(!"geometry")
+# Save
+write_csv(otter_maxent_df, here("maxent_inputs", "otter_obs.csv"))
+# Rewrite file 
+otter_obs <- read_csv(here("maxent_inputs", "otter_obs.csv"))
+# Convert to sf
+otter_sf <- st_as_sf(otter_obs, coords = c("longitude", "latitude"))
+# Crop out observations fr outside of CA (There's one)
+otter_crop <- st_crop(otter_sf, extent(aoi))
+# Save the cropped file
+write_csv(otter_crop, here("maxent_inputs", "otter_obs_crop.csv"))
+```
+
+## Kelp biomass from Tom Bell
+```{r}
+# Read in CONUS Landsat grid:
+lst <- st_read(here("raw_data", "CONUS_ARD_grid"), layer = "conus_ard_grid")
+# Get the extent
+lst_extent <- extent(lst)
+# Make a raster by dividing this into 30m pixels
+lst_raster <- raster(ext = lst_extent, res = 30, crs = crs(lst))
+# Reproject to the bo_crop extent:
+lst_reproject <- projectRaster(lst_raster, bo_crop)
+# Crop to our AOI
+ca_30m <- crop(lst_reproject, aoi)
+```
+
+```{r}
+# Open the ncdf
+kelp_2020 <- nc_open(here("raw_data", "kelpCanopyFromLandsat_2020_v2.nc"))
+# Pull the variables into R
+kelp_lat <- ncvar_get(kelp_2020, "lat")
+kelp_lon <- ncvar_get(kelp_2020, "lon")
+kelp_yr <- ncvar_get(kelp_2020, "year")
+kelp_q <- ncvar_get(kelp_2020, "quarter")
+
+tail(kelp_yr) # The last 4 columns are 2020
+tail(kelp_q) # THe last 4 columns are quarters 1234, 1 = jan-march, 2 = apr-june, 3 = jul-sep, 4 = oct-dec
+# Each season is a column!!!!!
+kelp_biomass <- ncvar_get(kelp_2020, "biomass")
+
+# Convert from arrays to vectors
+kelp_latv <- c(kelp_lat)
+kelp_lonv <- c(kelp_lon)
+# Create a data frame
+# Most recent data is summer and fall from 2019, winter and spring from 2020. Indexed accordingly..
+kelp_df <- data.frame(lat = kelp_latv, lon = kelp_lonv, winter = kelp_biomass[, 145], spring = kelp_biomass[, 146], summer = kelp_biomass[,143], fall = kelp_biomass[,144])
+
+unique(kelp_df$summer)
+# Make it spatial
+kelp_sf <- st_as_sf(kelp_df, coords = c("lon", "lat"))
+st_crs(kelp_sf) <- (proj)
+# plot(kelp_sf)
+# Rasterize it
+kelp_raster<- rasterize(kelp_sf, bo_crop, fun = "sum")
+
+# Create a blank raster of our BO extent
+blank <- bo_crop$BO_ph
+blank_reclass <- reclassify(blank,
+                            c(-Inf, Inf, 0))
+plot(blank_reclass)
+
+plot(kelp_raster)
+# Then fill all the cells with missing values with zeroes
+kelp_new <- cover(kelp_raster, blank_reclass)
+
+plot(kelp_new)
+
+plot(blank)
+plot(kelp_raster$summer)
+hist(kelp_new$summer)
+unique(kelp_new$fall)
+# Save em
+writeRaster(kelp_new$winter, here("maxent_inputs", "kelp_janmar.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(kelp_new$spring, here("maxent_inputs", "kelp_aprjun.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(kelp_new$summer, here("maxent_inputs", "kelp_julsep.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(kelp_new$fall, here("maxent_inputs", "kelp_octdec.asc"), format = "ascii", overwrite = TRUE)
+```
+
+## Let's turn kelp biomass into observations:
+```{r}
+# Turn biomass estimates into observations:
+# This functon samples from our probability distribution:
+set.seed(500)
+kelp_oct_count <- sampleRast(kelp_new$fall, 10000, replace = TRUE, prob = TRUE)
+kelp_oct_ct_sf <- st_as_sf(as.data.frame(kelp_oct_count),
+                           coords = c("x", "y"))
+# Jitter the geometries to get rid of overlap:
+kelp_oct_ct_jitter <- st_jitter(kelp_oct_ct_sf, factor = .0001)
+plot(kelp_oct_ct_jitter)
+# Format this for maxent
+kelp_oct_maxent <- kelp_oct_ct_jitter %>% 
+  mutate(species = "Kelp",
+         longitude = sf::st_coordinates(.)[,1],
+         latitude = sf::st_coordinates(.)[,2]) %>% 
+  as.data.frame() %>% 
+  dplyr::select("species", "longitude", "latitude")
+# Save it:
+write_csv(kelp_oct_maxent, here("maxent_inputs", "kelp", "kelp_oct_maxent.csv"))
+```
+
+## Kelp Observation data
+from https://wildlife.ca.gov/Conservation/Marine/Kelp/Aerial-Kelp-Surveys
+```{r}
+# We need to turn these shapefiles into observation points for each kelp forest
+# Read in data:
+kelp_aerial <- read_sf(here("raw_data", "kelp", "BIO_CA_Kelp2016"), layer = "BIO_CA_Kelp2016", )
+# Make an observation point at the center of each point
+kelp_centroid <- st_centroid(kelp_aerial)
+# Transform it to lat-lon, not degrees
+kelp_t <- st_transform(kelp_centroid, proj)
+# Save a Maxent ready data frame
+kelp_observations <- kelp_t %>% 
+  mutate(species = "Kelp") %>% 
+  mutate(longitude = unlist(map(kelp_t$geometry,1))) %>% 
+  mutate(latitude = unlist(map(kelp_t$geometry,2))) %>% 
+  as.data.frame() %>% 
+  dplyr::select(species, longitude, latitude)
+# Save file:
+write_csv(kelp_observations, here("maxent_inputs", "kelp", "kelp_observations.csv"))
+```
+
+# Additional BO environmental layers for kelp:
+
+```{r}
+bo_sal <- load_layers("BO_salinity")
+bo_sal_crop <- crop(bo_sal, aoi)
+writeRaster(bo_sal_crop$BO_salinity, here("maxent_inputs", "kelp", "bo_sal.asc"), format = "ascii", overwrite = TRUE)
+```
+## Wavewatch III data:
+```{r}
+# Generate links to download sites:
+# Create a vector for the years and months
+year <- c(2015:2018, by = 1)
+month <- c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12")
+# Paste all combos of them together
+dates <- paste(rep(year, each = 12), month, sep = "")
+
+links <- NULL
+# Generate links!
+for(date in dates){
+  links[date] <- paste("ftp://polar.ncep.noaa.gov/pub/history/waves/multi_1/", date, "/gribs/multi_1.wc_10m.hs.", date, ".grb2", sep = "")
+}
+
+# Get these files!
+for(link in links){
+download.file(link, destfile = basename(link))
+}
+```
+
+Grib files were converted into netcdf using the wgrib2 utility, available from https://www.cpc.ncep.noaa.gov/products/wesley/wgrib2/
+and the following bash script:
+
+```{bash}
+# cd into current directory
+cd Desktop/Bren/"2nd Year"/"270p Conservation Planning"/otters/raw_data/wavewatch
+# use wgrib2 to convert to netcdf
+for file in *.grb2; do wgrib2 "$file" -netcdf "${file/%ext/out}".nc; done
+```
+
+```{r}
+# Generate a list of filenames..
+files <- list.files(here("raw_data", "wavewatch"), pattern = ".nc")
+# Average wave heights for each month
+for(i in 1:length(files)){
+  # Brick all the 3 hour readings for a month
+  brick_t <- brick(here("raw_data", "wavewatch", files[i]))
+  # Average them
+  t_avg <- calc(brick_t, fun = mean)
+  # Get the date as a name
+  name <- str_extract(files[i], pattern = "20....")
+  full_name <- paste(name, ".tif", sep = "")
+  # Save them
+  writeRaster(t_avg, here("scratch", "wavewatch", full_name), overwrite = TRUE)
+}
+```
+
+```{r}
+# Average these for the entire run
+files <- list.files(here("scratch", "wavewatch"))
+# Brick all these files
+wave_b <- brick(here("scratch", "wavewatch", files))
+# Average the whole brick
+wave_avg <- calc(wave_b, mean)
+#plot(wave_avg)
+# Crop to aoi
+wave_crop <- crop(wave_avg, aoi)
+# Resample to the BioOracle cell size
+wave_resample <- resample(wave_crop, bo_crop, method = "ngb")
+plot(wave_resample)
+# Save it
+writeRaster(wave_resample, here("maxent_inputs", "kelp", "wave_ht.asc"), format = "ascii", overwrite = TRUE)
+```
+
+## Future Bio-Oracle layers
+
+```{r}
+#Try again with BO data from the internet
+# This is for RCP 4.5 and 2050
+# Get the layer names
+bo_fut_names <- list.files(here("raw_data", "BO_4.5"))
+# Stack them
+bofuture_brick <- stack(here("raw_data", "BO_4.5", bo_fut_names))
+crs(bofuture_brick) <- proj
+# Crop them
+bofuture_crop <- crop(bofuture_brick, aoi)
+# Save them all
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Current.Velocity.Max.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_cvmax.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Current.Velocity.Mean.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_cvmean.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Current.Velocity.Min.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_cvmin.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Salinity.Max.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_salmax.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Salinity.Mean.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_sal.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Salinity.Min.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_salmin.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Temperature.Max.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_sstmax.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Temperature.Mean.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_sstmean.asc"), format = "ascii", overwrite = TRUE)
+writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Temperature.Min.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_sstmin.asc"), format = "ascii", overwrite = TRUE)
+
+```
