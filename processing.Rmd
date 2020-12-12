@@ -8,6 +8,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 library(tidyverse)
 library(here)
+<<<<<<< HEAD
 library(raster)
 library(sf)
 library(sdmpredictors)
@@ -317,3 +318,54 @@ writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Temperature.Mean.asc.BOv2_1, 
 writeRaster(bofuture_crop$X2050AOGCM.RCP45.Surface.Temperature.Min.asc.BOv2_1, here("maxent_inputs", "kelp", "maxent_4.5", "bo_sstmin.asc"), format = "ascii", overwrite = TRUE)
 
 ```
+=======
+library(dismo) #Contains maxent!
+library(raster)
+library(sf)
+
+
+rasterOptions(maxmemory = 1e10)
+```
+
+### This is a document for processing raw data for the Conservation Planning final project.
+
+
+Let's explore our raw otter data:
+
+Unfortunately, this data is presented as a density of otter observations per km2, but averaged over three years. If we multiply this density by the area of each observation unit, we should get the three year average number of otters per observation unit. However, the USGS reported 2962 total otters observed. Our new total summs to 2802, so there's a rounding error somewhere.
+
+
+```{r}
+otter_count <- read_sf(here("raw_data", "Census_sum_2019", "Census_sum_2019.shp"))
+
+# dens_sm is the 3 year average of sea otters per square km
+
+# Area is square km
+
+# Multiplying these gets the number of otters per unit!
+
+otter_numbers <- otter_count %>% 
+  mutate(otter_number = round((dens_sm * AREA), 0))
+
+# We've lost 63 otters from rounding, unfortunately
+sum(otter_numbers$otter_number)
+
+otter_select <- otter_numbers %>% 
+  dplyr::select(otter_number)
+
+plot(otter_select)
+```
+Turn otter counts into points:
+
+```{r}
+# calculate the centroid of each unit:
+
+otter_centroid <- otter_select %>% 
+  mutate(centroid = st_centroid(geometry)) %>% 
+  mutate(species = "Enhydra lutis")
+
+otter_cent_wide <- otter_centroid %>% 
+  pivot_wider(values_from = otter_number)
+```
+
+>>>>>>> b5e2e166c13f2455055cd1131d9c0bd8e7cd91c6

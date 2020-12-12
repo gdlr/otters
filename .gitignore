@@ -2,6 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+<<<<<<< HEAD
 raw_data
 Output
 figs
@@ -14,3 +15,5 @@ Output
 scratch
 AIS_2019
 maxent_inputs
+=======
+>>>>>>> b5e2e166c13f2455055cd1131d9c0bd8e7cd91c6
